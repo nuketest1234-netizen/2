@@ -2,7 +2,6 @@ require("dotenv").config();
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
-const path = require('path');
 const { Client } = require("discord.js-selfbot-v13");
 const { joinVoiceChannel, VoiceConnectionStatus, entersState } = require("@discordjs/voice");
 
@@ -64,6 +63,7 @@ let clients = [];
 let connections = new Map();
 let currentChannelId = null;
 let watchdog = null;
+let rejoinTimer = null;
 let isRunning = false;
 
 console.log("waiting for tokens...");
@@ -83,9 +83,8 @@ async function joinOne(index, client) {
         }
         const existing = connections.get(index);
         if (existing) {
-            const st = existing.state?.status;
-            if (st === VoiceConnectionStatus.Ready) return true;
             try { existing.destroy(); } catch(e){}
+            connections.delete(index);
         }
         const conn = joinVoiceChannel({
             channelId: channel.id,
@@ -98,7 +97,7 @@ async function joinOne(index, client) {
         connections.set(index, conn);
 
         conn.on('stateChange', async (oldS, newS) => {
-            emit(`bot ${index+1} voice: ${oldS.status} -> ${newS.status}`);
+            if (oldS.status !== newS.status) emit(`bot ${index+1}: ${oldS.status}->${newS.status}`);
             if (newS.status === VoiceConnectionStatus.Disconnected) {
                 try {
                     await Promise.race([
@@ -107,6 +106,7 @@ async function joinOne(index, client) {
                     ]);
                 } catch {
                     try { conn.destroy(); } catch(e){}
+                    connections.delete(index);
                 }
             }
         });
@@ -117,11 +117,6 @@ async function joinOne(index, client) {
         emit(`bot ${index+1} join err: ${e.message}`, 'e');
         return false;
     }
-}
-
-function joinAll() {
-    if (!currentChannelId) return;
-    clients.forEach((client, i) => joinOne(i, client));
 }
 
 function startWatchdog() {
@@ -139,6 +134,45 @@ function startWatchdog() {
     }, 20000);
 }
 
+// force reconnect every 90 minutes to avoid discord's ~4h voice token expiry
+function startRejoinTimer() {
+    if (rejoinTimer) clearInterval(rejoinTimer);
+    rejoinTimer = setInterval(async () => {
+        if (!isRunning || !currentChannelId || clients.length === 0) return;
+        emit('scheduled rejoin (90min refresh)', 'w');
+        for (const [i, client] of clients.entries()) {
+            try {
+                const conn = connections.get(i);
+                if (conn) { try { conn.destroy(); } catch(e){} connections.delete(i); }
+                await new Promise(r => setTimeout(r, 300));
+                await joinOne(i, client);
+            } catch (e) { emit(`rejoin ${i+1} err: ${e.message}`, 'e'); }
+        }
+    }, 90 * 60 * 1000);
+}
+
+// also re-login the gateway every 3 hours to refresh session
+function startSessionRefresh() {
+    if (global._sessRef) clearInterval(global._sessRef);
+    global._sessRef = setInterval(async () => {
+        if (!isRunning) return;
+        emit('gateway session refresh (3h)', 'w');
+        for (const [i, client] of clients.entries()) {
+            try {
+                const conn = connections.get(i);
+                if (conn) { try { conn.destroy(); } catch(e){} connections.delete(i); }
+            } catch(e){}
+        }
+        await new Promise(r => setTimeout(r, 1500));
+        if (currentChannelId) {
+            for (const [i, client] of clients.entries()) {
+                await joinOne(i, client);
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
+    }, 3 * 60 * 60 * 1000);
+}
+
 function startBots(newTokens) {
     if (isRunning) stopBots();
     tokens = newTokens;
@@ -152,15 +186,21 @@ function startBots(newTokens) {
             if (currentChannelId) joinOne(i, client);
         });
         client.on('error', (e) => emit(`bot ${i+1} err: ${e.message}`, 'e'));
+        client.on('disconnect', () => emit(`bot ${i+1} gateway disconnect`, 'w'));
+        client.on('reconnecting', () => emit(`bot ${i+1} reconnecting...`, 'w'));
         client.login(token).catch(err => emit(`bot ${i+1} login fail: ${err.message}`, 'e'));
         clients.push(client);
     });
     startWatchdog();
+    startRejoinTimer();
+    startSessionRefresh();
 }
 
 function stopBots() {
     isRunning = false;
     if (watchdog) { clearInterval(watchdog); watchdog = null; }
+    if (rejoinTimer) { clearInterval(rejoinTimer); rejoinTimer = null; }
+    if (global._sessRef) { clearInterval(global._sessRef); global._sessRef = null; }
     connections.forEach(c => { try { c.destroy(); } catch(e){} });
     connections.clear();
     clients.forEach(c => { try { c.destroy(); } catch(e){} });

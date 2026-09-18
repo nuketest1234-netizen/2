@@ -20,7 +20,8 @@ const {
     AudioPlayerStatus,
     StreamType,
     entersState,
-    VoiceConnectionStatus
+    VoiceConnectionStatus,
+    generateDependencyReport
 } = require("@discordjs/voice");
 const { spawn } = require("child_process");
 
@@ -38,8 +39,7 @@ process.env.ENCRYPTION_LIBRARY = 'tweetnacl';
 const playdl = require('play-dl');
 
 try {
-    const v = require('@discordjs/voice');
-    if (v.generateDependencyReport) console.log(v.generateDependencyReport());
+    console.log(generateDependencyReport());
 } catch (e) { console.log('dep report:', e.message); }
 
 const app = express();
@@ -169,11 +169,18 @@ function stopFFmpeg() {
 function startSilentStream(index) {
     try {
         const proc = spawn(ffmpegPath, [
+            "-hide_banner",
+            "-loglevel", "error",
             "-re",
             "-f", "lavfi",
             "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-            "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"
-        ]);
+            "-f", "s16le",
+            "-ar", "48000",
+            "-ac", "2",
+            "pipe:1"
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        proc.on('error', (e) => console.log('silent ffmpeg error:', e.message));
+        proc.stderr.on('data', (d) => { const s = d.toString().trim(); if (s) console.log('[silent ffmpeg]', s); });
         silentProcesses.set(index, proc);
         const player = players.get(index);
         if (player) {
@@ -264,10 +271,19 @@ function startFFmpegStream(inputSource) {
     const filters = buildFilters();
     console.log('starting ffmpeg with url:', inputSource);
     currentFFmpegProcess = spawn(ffmpegPath, [
-        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-        "-i", inputSource, "-filter:a", filters,
-        "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"
-    ]);
+        "-hide_banner",
+        "-loglevel", "error",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-i", inputSource,
+        "-vn",
+        "-filter:a", filters,
+        "-f", "s16le",
+        "-ar", "48000",
+        "-ac", "2",
+        "pipe:1"
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
     currentFFmpegProcess.on('error', (e) => console.log('ffmpeg error:', e.message));
     currentFFmpegProcess.stderr.on('data', (d) => {
         const s = d.toString().trim();

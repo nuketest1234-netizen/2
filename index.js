@@ -23,7 +23,13 @@ const {
 } = require("@discordjs/voice");
 const { spawn } = require("child_process");
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+process.env.FFMPEG_PATH = ffmpegPath;
 const playdl = require('play-dl');
+
+try {
+    const v = require('@discordjs/voice');
+    if (v.generateDependencyReport) console.log(v.generateDependencyReport());
+} catch (e) {}
 
 const app = express();
 const server = http.createServer(app);
@@ -56,13 +62,11 @@ const HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta n
 + '.err{color:#ff5252}.warn{color:#ffb340}.info{color:#b57cff}'
 + '</style></head><body>'
 + '<h1>RINTU DASHBOARD</h1><div class="sub">◆ self-bot controller ◆</div>'
-
 + '<div class="card"><div class="t">🔑 TOKENS</div>'
 + '<textarea id="tokens" placeholder="paste tokens, one per line"></textarea>'
 + '<div><span class="p">🎫 <b id="tc">0</b></span><span class="p ok">✅ <b id="tv">0</b></span></div>'
 + '<button class="bs" onclick="saveT()">save</button>'
 + '<button class="bl" onclick="loadT()">load</button></div>'
-
 + '<div class="card"><div>'
 + '<span class="dot off" id="dot"></span><span id="st">OFFLINE</span>'
 + '<span class="p">🤖 <b id="bc">0</b></span>'
@@ -71,7 +75,6 @@ const HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta n
 + '<button class="bst" onclick="start()">▶ START</button>'
 + '<button class="bsp" onclick="stop()">■ STOP</button>'
 + '</div></div>'
-
 + '<div class="card"><div class="t">⚡ QUICK</div><div class="grid">'
 + '<div class="g" onclick="cmd(\'stop\')">⏹️<br>stop</div>'
 + '<div class="g" onclick="cmd(\'pause\')">⏸️<br>pause</div>'
@@ -88,18 +91,15 @@ const HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta n
 + '<div class="g" onclick="cmd(\'max\')">💀<br>max</div>'
 + '<div class="g" onclick="cmd(\'status\')">📊<br>status</div>'
 + '</div></div>'
-
 + '<div class="card"><div class="t">⌨️ CMD</div>'
 + '<input id="ci" placeholder="play url or channel id" onkeydown="if(event.key===\'Enter\')send()">'
 + '<button class="send" onclick="send()">send ✦</button></div>'
-
 + '<div class="card"><div class="t">📜 LOG</div><div id="log"></div></div>'
-
 + '<script src="/socket.io/socket.io.js"></script><script>'
 + 'var s=io();function $(i){return document.getElementById(i)}'
 + 'function L(m,c){var e=$("log");var d=document.createElement("div");if(c)d.className=c;d.textContent="["+new Date().toLocaleTimeString()+"] "+m;e.appendChild(d);e.scrollTop=e.scrollHeight}'
 + '$("tokens").addEventListener("input",function(){var l=$("tokens").value.split("\\n").map(function(t){return t.trim()}).filter(function(t){return t.length>20});$("tc").textContent=l.length;$("tv").textContent=l.length});'
-+ 'function saveT(){$("tokens").value;localStorage.setItem("rt",$("tokens").value);L("tokens saved","info")}'
++ 'function saveT(){localStorage.setItem("rt",$("tokens").value);L("tokens saved","info")}'
 + 'function loadT(){var v=localStorage.getItem("rt")||"";$("tokens").value=v;var c=v.split("\\n").filter(function(t){return t.trim().length>20}).length;$("tc").textContent=c;$("tv").textContent=c;L("loaded "+c+" tokens","info")}'
 + 'window.addEventListener("DOMContentLoaded",loadT);'
 + 'function start(){var r=$("tokens").value.trim();if(!r)return L("no tokens","err");var l=r.split("\\n").map(function(t){return t.trim()}).filter(function(t){return t.length>20});if(!l.length)return L("no valid tokens","err");L("starting "+l.length,"info");s.emit("start_bots_with_tokens",{tokens:l})}'
@@ -125,6 +125,7 @@ let connections = new Map();
 let players = new Map();
 let activeResources = new Map();
 let currentFFmpegProcess = null;
+let silentProcesses = new Map();
 let currentUrl = null;
 let currentTitle = "Nothing playing";
 let currentChannelId = null;
@@ -152,6 +153,34 @@ function stopFFmpeg() {
         try { currentFFmpegProcess.kill("SIGKILL"); } catch (e) {}
         currentFFmpegProcess = null;
     }
+}
+
+function startSilentStream(index) {
+    try {
+        const proc = spawn(ffmpegPath, [
+            "-re",
+            "-f", "lavfi",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"
+        ]);
+        silentProcesses.set(index, proc);
+        const player = players.get(index);
+        if (player) {
+            const res = createAudioResource(proc.stdout, { inputType: StreamType.Raw, inlineVolume: true });
+            res.volume.setVolume(0.01);
+            player.play(res);
+        }
+    } catch (e) { console.log('silent stream error:', e.message); }
+}
+
+function stopSilentStream(index) {
+    const p = silentProcesses.get(index);
+    if (p) { try { p.kill("SIGKILL"); } catch(e){} silentProcesses.delete(index); }
+}
+
+function stopAllSilent() {
+    silentProcesses.forEach(p => { try { p.kill("SIGKILL"); } catch(e){} });
+    silentProcesses.clear();
 }
 
 function stopLoudMode() {
@@ -220,6 +249,7 @@ function buildFilters() {
 
 function startFFmpegStream(inputSource) {
     stopFFmpeg();
+    stopAllSilent();
     const filters = buildFilters();
     currentFFmpegProcess = spawn(ffmpegPath, [
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
@@ -285,6 +315,7 @@ function stopBots() {
     isBotRunning = false;
     stopFFmpeg();
     stopLoudMode();
+    stopAllSilent();
     if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
     players.forEach(p => { try { p.stop(); } catch(e){} });
     players.clear();
@@ -334,7 +365,7 @@ app.post('/api/command', async (req, res) => {
         else if (c === 'pause') { players.forEach(p => p.pause()); isPaused = true; response = 'paused'; }
         else if (c === 'resume') { players.forEach(p => p.unpause()); isPaused = false; response = 'resumed'; }
         else if (c === 'leave') {
-            stopFFmpeg(); stopLoudMode();
+            stopFFmpeg(); stopLoudMode(); stopAllSilent();
             players.forEach(p => p.stop()); players.clear();
             connections.forEach(x => { try { x.destroy(); } catch(e){} }); connections.clear();
             activeResources.clear(); currentUrl = null; currentChannelId = null; response = 'left all vcs';
@@ -369,6 +400,9 @@ app.post('/api/command', async (req, res) => {
                     });
                     const player = createAudioPlayer();
                     conn.subscribe(player);
+                    connections.set(index, conn);
+                    players.set(index, player);
+
                     conn.on('stateChange', async (oldS, newS) => {
                         if (newS.status === VoiceConnectionStatus.Disconnected) {
                             try {
@@ -387,16 +421,23 @@ app.post('/api/command', async (req, res) => {
                                         });
                                         nc.subscribe(players.get(index));
                                         connections.set(index, nc);
+                                        startSilentStream(index);
                                     } catch(e) { console.log('rejoin fail:', e.message); }
                                 }, 3000);
                             }
                         }
                     });
+
                     player.on(AudioPlayerStatus.Idle, () => {
-                        if (loopMode && currentUrl && !isPaused && index === 0) setTimeout(() => startFFmpegStream(currentUrl), 500);
+                        if (loopMode && currentUrl && !isPaused && index === 0) {
+                            setTimeout(() => startFFmpegStream(currentUrl), 500);
+                        } else if (!currentUrl) {
+                            startSilentStream(index);
+                        }
                     });
-                    connections.set(index, conn);
-                    players.set(index, player);
+
+                    // start silent stream immediately to hold vc 24/7
+                    setTimeout(() => startSilentStream(index), 1500);
                     joined++;
                 } catch (err) { console.log(`bot ${index+1} join error: ${err.message}`); }
             }

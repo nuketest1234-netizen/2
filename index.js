@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 
 try {
     const ClientUserSettingManager = require("./node_modules/discord.js-selfbot-v13/src/managers/ClientUserSettingManager.js");
@@ -22,9 +23,18 @@ const {
     VoiceConnectionStatus
 } = require("@discordjs/voice");
 const { spawn } = require("child_process");
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+
+let ffmpegPath = 'ffmpeg';
+try {
+    const bundled = require('@ffmpeg-installer/ffmpeg').path;
+    if (fs.existsSync(bundled)) ffmpegPath = bundled;
+} catch (e) {}
+console.log('using ffmpeg at:', ffmpegPath);
+
 process.env.FFMPEG_PATH = ffmpegPath;
 process.env.OPUS_LIBRARY = 'opusscript';
+process.env.ENCRYPTION_LIBRARY = 'tweetnacl';
+
 const playdl = require('play-dl');
 
 try {
@@ -252,12 +262,18 @@ function startFFmpegStream(inputSource) {
     stopFFmpeg();
     stopAllSilent();
     const filters = buildFilters();
+    console.log('starting ffmpeg with url:', inputSource);
     currentFFmpegProcess = spawn(ffmpegPath, [
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
         "-i", inputSource, "-filter:a", filters,
         "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"
     ]);
     currentFFmpegProcess.on('error', (e) => console.log('ffmpeg error:', e.message));
+    currentFFmpegProcess.stderr.on('data', (d) => {
+        const s = d.toString().trim();
+        if (s) console.log('[ffmpeg]', s);
+    });
+    currentFFmpegProcess.on('exit', (code) => console.log('[ffmpeg exit] code=' + code));
     clients.forEach((client, index) => {
         const player = players.get(index);
         if (player && currentFFmpegProcess) {
@@ -348,7 +364,7 @@ app.post('/api/command', async (req, res) => {
     try {
         if (c === 'help') response = 'cmds: play <url|yt|mp3>, volume <1-20000>, max, blast, doubleblast, superloud, forceloud, bassboost, pungi, pungiset <n>, loudmode, loop, pause, resume, stop, leave, status';
         else if (c.startsWith('play ')) {
-            const url = command.slice(5).trim();
+            const url = command.slice(5).trim().split(/\s+/)[0];
             if (connections.size === 0) response = 'join a vc first (send channel id)';
             else if (isDirectAudio(url)) { currentUrl = url; currentTitle = "Direct Audio"; startFFmpegStream(url); response = `playing direct: ${url}`; }
             else if (isYouTubeUrl(url)) {

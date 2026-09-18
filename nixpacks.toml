@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "openssl", "ffmpeg", "libopus"]
+nixPkgs = ["nodejs_20", "openssl", "ffmpeg", "libopus", "python3", "make", "gcc", "g++"]

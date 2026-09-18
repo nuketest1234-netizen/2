@@ -24,12 +24,13 @@ const {
 const { spawn } = require("child_process");
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 process.env.FFMPEG_PATH = ffmpegPath;
+process.env.OPUS_LIBRARY = 'opusscript';
 const playdl = require('play-dl');
 
 try {
     const v = require('@discordjs/voice');
     if (v.generateDependencyReport) console.log(v.generateDependencyReport());
-} catch (e) {}
+} catch (e) { console.log('dep report:', e.message); }
 
 const app = express();
 const server = http.createServer(app);
@@ -436,7 +437,6 @@ app.post('/api/command', async (req, res) => {
                         }
                     });
 
-                    // start silent stream immediately to hold vc 24/7
                     setTimeout(() => startSilentStream(index), 1500);
                     joined++;
                 } catch (err) { console.log(`bot ${index+1} join error: ${err.message}`); }
